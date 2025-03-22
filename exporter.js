@@ -1,6 +1,7 @@
 const { Driver } = require('zwave-js');
 const prometheus = require('prom-client');
 const http = require('http');
+const fs = require('fs');
 
 const LOG_LEVELS = { 'debug': 1, 'info': 2, 'warn': 3, 'error': 4 };
 const LOG_LEVEL = LOG_LEVELS[process.env.LOGLEVEL] || LOG_LEVELS.info;
@@ -44,12 +45,12 @@ function log(level, message, kv) {
   }
 }
 
+const config = require('./config.js');
+const driver = new Driver(ZWAVE_DEVICE, config);
 
-const driver = new Driver(ZWAVE_DEVICE);
 driver.on('error', (err) => {
   log("error", err);
 });
-
 
 driver.once('driver ready', () => {
   driver.controller.nodes.forEach(async (node) => {
@@ -57,8 +58,10 @@ driver.once('driver ready', () => {
       'node.id': node.id,
       'node.label': node.label,
       'node.class': node.deviceClass.generic.label,
+      'node.name': node.name,
     });
     node.on('value updated', (node, value) => {
+      let value_metadata = node.getValueMetadata(value);
       log('debug', 'value updated', {
         'node.id': node.id,
         'node.label': node.label,
@@ -66,26 +69,39 @@ driver.once('driver ready', () => {
         'value.propertyName': value.propertyName,
         'value.propertyKeyName': value.propertyKeyName,
         'value.value': value.newValue,
+        'value.type': value_metadata.type,
       });
-      let value_metadata = node.getValueMetadata(value);
-      let value_unit = value_metadata.unit;
-      let unit_string = unit_mapping[value_unit] || '_unknownunit';
       let value_name = value.propertyKeyName || value.propertyName;
+      let suffix = '';
+      let unit;
+      let metricValue;
+      if (typeof(value.newValue) == 'boolean') {
+        metricValue = value.newValue ? 1 : 0;
+      } else if (typeof(value.newValue) == 'number') {
+        unit = value_metadata.unit;
+        metricValue = value.newValue;
+      } else {
+        unit = value.newValue.unit ?? value_metadata.unit;
+        metricValue = value.newValue.value;
+      }
+      if (unit) {
+        suffix = unit_mapping[unit] ?? unit;
+      }
       let metric_name = 'zwave_' + value_name
-        .toLowerCase()
-        .replace(/ /g, '_')
-        .replace(/₂/g, '2')
-        .replace(/[()]/g, '')
-        + unit_string;
+      .toLowerCase()
+      .replace(/ /g, '_')
+      .replace(/₂/g, '2')
+      .replace(/[()]/g, '')
+      + suffix;
       if (! (metric_name in metrics) ) {
         log('info', 'registering new metric', {'metric': metric_name });
         metrics[metric_name] = new prometheus.Gauge({
           name: metric_name,
           help: value_metadata.label,
-          labelNames: [ 'node', 'endpoint' ],
+          labelNames: [ 'node', 'endpoint', 'name' ],
         });
       }
-      metrics[metric_name].set({ node: node.id, endpoint: value.endpoint }, value.newValue);
+      metrics[metric_name].set({ node: node.id, endpoint: value.endpoint, name: node.name }, metricValue);
     });
     if (ZWAVE_INTERVAL > 0) {
       log('info', `we will actively ask node ${node.id} to refresh its values every ${ZWAVE_INTERVAL} seconds`);
@@ -111,7 +127,7 @@ if (MAX_RSS > 0) {
 }
 
 (async () => {
-  try {
+  try { 
     await driver.start();
     log('info', 'Z-Wave driver started.');
   } catch (err) {
