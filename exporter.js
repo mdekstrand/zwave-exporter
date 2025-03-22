@@ -115,7 +115,6 @@ driver.once('driver ready', () => {
         let time = performance.now();
         if (rec) {
           let elapsed = time - rec.last;
-          elapsed /= 1000;
           let energy = metricValue * elapsed;
           rec.joules +=  energy;
           consumed_counter.inc(labels, energy);
