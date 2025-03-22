@@ -1,7 +1,7 @@
 const { Driver } = require('zwave-js');
 const prometheus = require('prom-client');
+const {performance} = require('perf_hooks');
 const http = require('http');
-const fs = require('fs');
 
 const LOG_LEVELS = { 'debug': 1, 'info': 2, 'warn': 3, 'error': 4 };
 const LOG_LEVEL = LOG_LEVELS[process.env.LOGLEVEL] || LOG_LEVELS.info;
@@ -47,6 +47,13 @@ function log(level, message, kv) {
 
 const config = require('./config.js');
 const driver = new Driver(ZWAVE_DEVICE, config);
+
+const consumed_counter = new prometheus.Counter({
+  name: 'zwave_estimated_power_joules',
+  help: 'Estimated power consumption',
+  labelNames: [ 'node', 'endpoint', 'name' ],
+})
+const consumption = {};
 
 driver.on('error', (err) => {
   log("error", err);
@@ -101,7 +108,21 @@ driver.once('driver ready', () => {
           labelNames: [ 'node', 'endpoint', 'name' ],
         });
       }
-      metrics[metric_name].set({ node: node.id, endpoint: value.endpoint, name: node.name }, metricValue);
+      let labels = { node: node.id, endpoint: value.endpoint, name: node.name };
+      if (metric_name == 'zwave_electric_w_consumed_watts') {
+        let key = `${node.id}:${value.endpoint}`;
+        let rec = consumption[key];
+        let time = performance.now();
+        if (rec) {
+          let elapsed = time - rec.last;
+          let energy = metricValue *elapsed * 0.001;
+          rec.joules +=  energy;
+          consumed_counter.inc(labels, energy);
+        } else {
+          consumption[key] = {last: time, joules: 0};
+        }
+      }
+      metrics[metric_name].set(labels, metricValue);
     });
     if (ZWAVE_INTERVAL > 0) {
       log('info', `we will actively ask node ${node.id} to refresh its values every ${ZWAVE_INTERVAL} seconds`);
